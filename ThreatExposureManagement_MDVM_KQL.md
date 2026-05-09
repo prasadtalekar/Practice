@@ -24,7 +24,123 @@ MDVMRecommendations_CL
 | take 20
 ```
 
-## 1. Critical recommendations on internet-facing devices
+## 1. Azure Log Analytics-safe query
+
+Use this version if Azure Log Analytics reports a semantic/type error on
+`coalesce(...)`. Every candidate column is converted to the target type before
+`coalesce`, which avoids errors when custom table columns are a mix of string,
+real, GUID, boolean, or differently suffixed custom-log fields.
+
+```kusto
+// =======================================================
+// CONFIGURATION
+// =======================================================
+let Lookback = 7d;
+// =======================================================
+// STEP 1: Internet-facing devices from MDE telemetry
+// =======================================================
+let InternetFacingDevices =
+    DeviceInfo
+    | extend DeviceTime = todatetime(column_ifexists("TimeGenerated", column_ifexists("Timestamp", datetime(null))))
+    | where DeviceTime >= ago(Lookback)
+    | summarize arg_max(DeviceTime, *) by DeviceId
+    | where IsInternetFacing == true
+    | project
+        DeviceId = tostring(DeviceId),
+        InternetFacingDeviceName = tostring(DeviceName),
+        PublicIP = tostring(PublicIP),
+        OSPlatform = tostring(OSPlatform),
+        OSVersion = tostring(OSVersion),
+        MachineGroup = tostring(MachineGroup);
+// =======================================================
+// STEP 2: Normalize MDVM recommendations
+// =======================================================
+let NormalizedMDVM =
+    MDVMRecommendations_CL
+    | where TimeGenerated >= ago(Lookback)
+    | extend
+        DeviceId = coalesce(
+            tostring(column_ifexists("deviceId", "")),
+            tostring(column_ifexists("DeviceId_s", "")),
+            tostring(column_ifexists("DeviceId_g", "")),
+            tostring(column_ifexists("DeviceId", ""))),
+        RecommendationId = coalesce(
+            tostring(column_ifexists("recommendationReference", "")),
+            tostring(column_ifexists("recommendationReference_s", "")),
+            tostring(column_ifexists("RecommendationId_s", "")),
+            tostring(column_ifexists("RecommendationId", ""))),
+        RecommendationName = coalesce(
+            tostring(column_ifexists("recommendationName", "")),
+            tostring(column_ifexists("recommendationName_s", "")),
+            tostring(column_ifexists("RecommendationName_s", "")),
+            tostring(column_ifexists("RecommendationName", ""))),
+        Severity = coalesce(
+            tostring(column_ifexists("severity", "")),
+            tostring(column_ifexists("severity_s", "")),
+            tostring(column_ifexists("Severity_s", "")),
+            tostring(column_ifexists("Severity", ""))),
+        SeverityScore = coalesce(
+            todouble(column_ifexists("severityScore", "")),
+            todouble(column_ifexists("severityScore_d", "")),
+            todouble(column_ifexists("SeverityScore_d", "")),
+            real(0)),
+        CvssScore = coalesce(
+            todouble(column_ifexists("cvssScore", "")),
+            todouble(column_ifexists("cvssScore_d", "")),
+            todouble(column_ifexists("CvssScore_d", "")),
+            real(0)),
+        ExposureImpact = coalesce(
+            todouble(column_ifexists("exposureImpact", "")),
+            todouble(column_ifexists("exposureImpact_d", "")),
+            todouble(column_ifexists("ExposureImpact_d", "")),
+            real(0)),
+        RecommendationStatus = coalesce(
+            tostring(column_ifexists("status", "")),
+            tostring(column_ifexists("status_s", "")),
+            tostring(column_ifexists("Status_s", "")),
+            tostring(column_ifexists("Status", "")))
+    | project
+        TimeGenerated,
+        DeviceId,
+        RecommendationId,
+        RecommendationName,
+        Severity,
+        SeverityScore,
+        CvssScore,
+        ExposureImpact,
+        RecommendationStatus;
+// =======================================================
+// STEP 3: Filter to critical/high-risk recommendations
+// =======================================================
+let CriticalRecommendations =
+    NormalizedMDVM
+    | where isnotempty(DeviceId)
+    | where Severity =~ "Critical" or CvssScore >= 9.0
+    | where isempty(RecommendationStatus) or RecommendationStatus !in~ ("Completed", "Resolved", "Remediated", "Inactive")
+    | summarize arg_max(TimeGenerated, *) by DeviceId, RecommendationId, RecommendationName;
+// =======================================================
+// STEP 4: Join internet-facing devices + critical MDVM
+// =======================================================
+CriticalRecommendations
+| join kind=inner (InternetFacingDevices) on DeviceId
+| project
+    TimeGenerated,
+    DeviceId,
+    DeviceName = InternetFacingDeviceName,
+    PublicIP,
+    OSPlatform,
+    OSVersion,
+    MachineGroup,
+    RecommendationId,
+    RecommendationName,
+    Severity,
+    SeverityScore,
+    CvssScore,
+    ExposureImpact
+| order by ExposureImpact desc, CvssScore desc, DeviceName asc
+```
+
+## 2. Critical recommendations on internet-facing devices
 
 Use this when `DeviceInfo` is available in the same workspace. The query uses
 `DeviceInfo.IsInternetFacing` as the authoritative internet-facing signal and
@@ -105,7 +221,7 @@ let CriticalRecommendations =
     | where isempty(RecommendationStatus) or RecommendationStatus !in~ ("Completed", "Resolved", "Remediated", "Inactive")
     | summarize arg_max(TimeGenerated, *) by DeviceId, DeviceName, RecommendationId, RecommendationName, ProductName, CveId;
 CriticalRecommendations
-| join kind=innerunique (InternetFacingDevices) on DeviceId
+| join kind=inner (InternetFacingDevices) on DeviceId
 | extend DeviceName = coalesce(InternetFacingDeviceName, DeviceName)
 | project
     TimeGenerated,
@@ -129,7 +245,7 @@ CriticalRecommendations
 | order by ExposureImpact desc, CvssScore desc, DeviceName asc, RecommendationName asc
 ```
 
-## 2. Workbook summary by internet-facing device
+## 3. Workbook summary by internet-facing device
 
 Use this for a dashboard grid or tile that lists highest-risk internet-facing
 assets first.
@@ -170,7 +286,7 @@ CriticalRecommendations
 | order by CriticalRecommendationCount desc, MaxExposureImpact desc, MaxCvssScore desc, DeviceName asc
 ```
 
-## 3. Workbook summary by critical recommendation
+## 4. Workbook summary by critical recommendation
 
 Use this to show which critical recommendations affect the most
 internet-facing devices.
@@ -213,7 +329,7 @@ CriticalRecommendations
 | order by InternetFacingDeviceCount desc, MaxExposureImpact desc, MaxCvssScore desc, RecommendationName asc
 ```
 
-## 4. Fallback if `MDVMRecommendations_CL` already has an internet-facing field
+## 5. Fallback if `MDVMRecommendations_CL` already has an internet-facing field
 
 Use this if the custom table contains a boolean or string field such as
 `IsInternetFacing_b`, `IsInternetFacing_s`, or `InternetFacing_s` and you do not
@@ -251,7 +367,7 @@ MDVMRecommendations_CL
 | order by ExposureImpact desc, CvssScore desc, DeviceName asc, RecommendationName asc
 ```
 
-## 5. Workbook count tiles
+## 6. Workbook count tiles
 
 Internet-facing devices with at least one critical MDVM recommendation:
 
@@ -270,7 +386,7 @@ MDVMRecommendations_CL
     Severity = coalesce(tostring(column_ifexists("Severity_s", "")), tostring(column_ifexists("RecommendationSeverity_s", "")), tostring(column_ifexists("VulnerabilitySeverityLevel_s", "")), tostring(column_ifexists("Severity", ""))),
     CvssScore = coalesce(todouble(column_ifexists("CvssScore_d", real(null))), todouble(column_ifexists("CVSSScore_d", real(null))), todouble(column_ifexists("CvssScore_s", "")), todouble(column_ifexists("CvssScore", real(null))))
 | where Severity =~ "Critical" or CvssScore >= 9.0
-| join kind=innerunique (InternetFacingDevices) on DeviceId
+| join kind=inner (InternetFacingDevices) on DeviceId
 | summarize InternetFacingDevicesWithCriticalRecommendations = dcount(DeviceId)
 ```
 
