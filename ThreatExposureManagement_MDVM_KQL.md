@@ -83,17 +83,17 @@ let NormalizedMDVM =
             todouble(column_ifexists("severityScore", "")),
             todouble(column_ifexists("severityScore_d", "")),
             todouble(column_ifexists("SeverityScore_d", "")),
-            real(0)),
+            0.0),
         CvssScore = coalesce(
             todouble(column_ifexists("cvssScore", "")),
             todouble(column_ifexists("cvssScore_d", "")),
             todouble(column_ifexists("CvssScore_d", "")),
-            real(0)),
+            0.0),
         ExposureImpact = coalesce(
             todouble(column_ifexists("exposureImpact", "")),
             todouble(column_ifexists("exposureImpact_d", "")),
             todouble(column_ifexists("ExposureImpact_d", "")),
-            real(0)),
+            0.0),
         RecommendationStatus = coalesce(
             tostring(column_ifexists("status", "")),
             tostring(column_ifexists("status_s", "")),
