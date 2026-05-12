@@ -1,0 +1,471 @@
+// Threat and Exposure Management normalization functions.
+// Save these functions in Log Analytics / Sentinel in the order shown.
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Maps source severity and CVSS to a common TEM severity label."
+) TEM_NormalizeSeverity(severity:string, cvss:real)
+{
+    let s = tolower(tostring(severity));
+    case(
+        isnotnull(cvss) and cvss >= 9.0, "Critical",
+        isnotnull(cvss) and cvss >= 7.0, "High",
+        isnotnull(cvss) and cvss >= 4.0, "Medium",
+        isnotnull(cvss) and cvss > 0.0, "Low",
+        s has "critical", "Critical",
+        s has "high", "High",
+        s has "medium" or s has "moderate", "Medium",
+        s has "low", "Low",
+        s has "info", "Informational",
+        "Unknown"
+    )
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Converts source severity and CVSS to a 0-10 numeric score."
+) TEM_SeverityScore(severity:string, cvss:real)
+{
+    let normalized = TEM_NormalizeSeverity(severity, cvss);
+    case(
+        isnotnull(cvss) and cvss > 0.0, todouble(cvss),
+        normalized == "Critical", 9.5,
+        normalized == "High", 8.0,
+        normalized == "Medium", 5.0,
+        normalized == "Low", 2.0,
+        normalized == "Informational", 0.5,
+        1.0
+    )
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Asset enrichment from the TEM_AssetContext Sentinel watchlist."
+) TEM_AssetContext()
+{
+    let empty = datatable(
+        SearchKey:string,
+        AssetId:string,
+        AssetName:string,
+        Fqdn:string,
+        ResourceId:string,
+        Url:string,
+        AssetKind:string,
+        AssetCriticality:string,
+        AssetExposure:string,
+        BusinessService:string,
+        Owner:string,
+        Environment:string,
+        SourceSystem:string,
+        Tags:string
+    )[];
+    union isfuzzy=true empty, (
+        _GetWatchlist("TEM_AssetContext")
+        | project
+            SearchKey = tostring(SearchKey),
+            AssetId = tostring(AssetId),
+            AssetName = tostring(AssetName),
+            Fqdn = tostring(Fqdn),
+            ResourceId = tostring(ResourceId),
+            Url = tostring(Url),
+            AssetKind = tostring(AssetKind),
+            AssetCriticality = tostring(AssetCriticality),
+            AssetExposure = tostring(AssetExposure),
+            BusinessService = tostring(BusinessService),
+            Owner = tostring(Owner),
+            Environment = tostring(Environment),
+            SourceSystem = tostring(SourceSystem),
+            Tags = tostring(Tags)
+    )
+    | extend
+        AssetId = coalesce(nullif(AssetId, ""), nullif(ResourceId, ""), nullif(Url, ""), nullif(SearchKey, "")),
+        AssetName = coalesce(nullif(AssetName, ""), nullif(Fqdn, ""), nullif(Url, ""), AssetId),
+        AssetCriticality = case(
+            AssetCriticality in~ ("Critical", "High", "Medium", "Low"), AssetCriticality,
+            Tags has_any ("tier0", "crown", "critical", "business-critical"), "Critical",
+            Tags has "high", "High",
+            Tags has "medium", "Medium",
+            Tags has "low", "Low",
+            ""
+        ),
+        AssetExposure = case(
+            AssetExposure in~ ("External", "CriticalInternal", "RegularInternal", "Isolated"), AssetExposure,
+            Tags has_any ("internet", "external", "public"), "External",
+            Tags has_any ("critical-internal", "tier0-network", "privileged-network"), "CriticalInternal",
+            Tags has "isolated", "Isolated",
+            Tags has_any ("internal", "private"), "RegularInternal",
+            ""
+        )
+    | where isnotempty(AssetId)
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Latest MDE device enrichment including tags, asset value, exposure, and device type."
+) TEM_MdeDeviceContext()
+{
+    DeviceInfo
+    | summarize arg_max(TimeGenerated, *) by DeviceId
+    | extend TagsText = strcat(DeviceManualTags, ";", DeviceDynamicTags, ";", RegistryDeviceTag, ";", MachineGroup, ";", AssetValue)
+    | extend
+        MdeAssetCriticality = case(
+            AssetValue =~ "Critical", "Critical",
+            AssetValue =~ "High", "High",
+            TagsText has_any ("tier0", "crown", "critical", "business-critical"), "Critical",
+            TagsText has "high", "High",
+            TagsText has "medium", "Medium",
+            TagsText has "low", "Low",
+            ""),
+        MdeAssetExposure = case(
+            IsInternetFacing == true, "External",
+            ExposureLevel =~ "High", "CriticalInternal",
+            ExposureLevel in~ ("Medium", "Low"), "RegularInternal",
+            ""),
+        MdeAssetKind = case(
+            DeviceType =~ "Server" or OSPlatform has "Server" or OSPlatform in~ ("Linux", "Ubuntu", "RedHat", "CentOS"), "Server",
+            DeviceType =~ "Workstation" or OSPlatform has_any ("Windows10", "Windows11", "macOS"), "Workstation",
+            isnotempty(DeviceType), DeviceType,
+            ""),
+        MdeTags = TagsText
+    | project
+        DeviceId,
+        ContextDeviceName = DeviceName,
+        ContextAssetKind = MdeAssetKind,
+        ContextAssetCriticality = MdeAssetCriticality,
+        ContextAssetExposure = MdeAssetExposure,
+        ContextBusinessService = MachineGroup,
+        ContextEnvironment = "",
+        ContextOwner = "",
+        ContextTags = MdeTags,
+        ContextPublicIP = PublicIP,
+        ContextExposureLevel = ExposureLevel,
+        ContextIsInternetFacing = IsInternetFacing
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Applies the common TEM 0-100 risk scoring model to normalized findings."
+) TEM_ApplyRiskScore(T:(*))
+{
+    T
+    | extend
+        FindingBaseScore = TEM_SeverityScore(FindingSeverity, CvssScore),
+        ExploitBonus = case(
+            ExploitAvailable == true, 2.0,
+            tolower(Exploitability) has_any ("weaponized", "functional", "high", "exploited"), 1.5,
+            tolower(Exploitability) has_any ("proof", "poc", "medium"), 1.0,
+            0.0),
+        AssetCriticalityMultiplier = case(
+            AssetCriticality =~ "Critical", 1.50,
+            AssetCriticality =~ "High", 1.25,
+            AssetCriticality =~ "Medium", 1.00,
+            AssetCriticality =~ "Low", 0.80,
+            1.00),
+        AssetExposureMultiplier = case(
+            AssetExposure =~ "External", 1.50,
+            AssetExposure =~ "CriticalInternal", 1.25,
+            AssetExposure =~ "RegularInternal", 1.00,
+            AssetExposure =~ "Isolated", 0.80,
+            1.00)
+    | extend RiskScore = round(min_of(100.0, (FindingBaseScore + ExploitBonus) * 10.0 * AssetCriticalityMultiplier * AssetExposureMultiplier), 1)
+    | project-away FindingBaseScore, ExploitBonus, AssetCriticalityMultiplier, AssetExposureMultiplier
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "MDE workstation and server vulnerabilities normalized to the TEM finding-on-asset schema."
+) TEM_MdeVulnerabilities()
+{
+    let mdeDevices = TEM_MdeDeviceContext();
+    let assetContext =
+        TEM_AssetContext()
+        | where SourceSystem in~ ("", "MDE", "Defender", "MicrosoftDefender")
+        | project
+            WatchlistAssetId = AssetId,
+            WatchlistAssetName = AssetName,
+            WatchlistAssetKind = AssetKind,
+            WatchlistAssetCriticality = AssetCriticality,
+            WatchlistAssetExposure = AssetExposure,
+            WatchlistBusinessService = BusinessService,
+            WatchlistOwner = Owner,
+            WatchlistEnvironment = Environment,
+            WatchlistTags = Tags;
+    DeviceTvmSoftwareVulnerabilities
+    | where isnotempty(DeviceId) and isnotempty(CveId)
+    | join kind=leftouter (
+        DeviceTvmSoftwareVulnerabilitiesKB
+        | project
+            CveId,
+            KbCvssScore = CvssScore,
+            KbIsExploitAvailable = IsExploitAvailable,
+            KbVulnerabilityDescription = VulnerabilityDescription,
+            KbPublishedDate = PublishedDate,
+            KbAffectedSoftware = AffectedSoftware
+    ) on CveId
+    | join kind=leftouter mdeDevices on DeviceId
+    | join kind=leftouter assetContext on $left.DeviceId == $right.WatchlistAssetId
+    | extend
+        AssetKindDerived = case(
+            OSPlatform has "Server" or OSPlatform in~ ("Linux", "Ubuntu", "RedHat", "CentOS"), "Server",
+            OSPlatform has_any ("Windows10", "Windows11", "macOS"), "Workstation",
+            ContextAssetKind),
+        Severity = TEM_NormalizeSeverity(VulnerabilitySeverityLevel, KbCvssScore)
+    | project
+        TimeGenerated,
+        SourceSystem = "MDE",
+        FindingType = "Vulnerability",
+        AssetId = DeviceId,
+        AssetName = coalesce(nullif(WatchlistAssetName, ""), nullif(DeviceName, ""), nullif(ContextDeviceName, "")),
+        AssetKind = coalesce(nullif(WatchlistAssetKind, ""), nullif(AssetKindDerived, ""), "Endpoint"),
+        AssetCriticality = coalesce(nullif(WatchlistAssetCriticality, ""), nullif(ContextAssetCriticality, ""), "Medium"),
+        AssetExposure = coalesce(nullif(WatchlistAssetExposure, ""), nullif(ContextAssetExposure, ""), "RegularInternal"),
+        BusinessService = coalesce(nullif(WatchlistBusinessService, ""), nullif(ContextBusinessService, "")),
+        Owner = WatchlistOwner,
+        Environment = WatchlistEnvironment,
+        FindingId = CveId,
+        FindingTitle = strcat(CveId, " on ", SoftwareName),
+        FindingCategory = "Software vulnerability",
+        FindingSeverity = Severity,
+        CvssScore = todouble(KbCvssScore),
+        CvssVector = "",
+        ExploitAvailable = KbIsExploitAvailable,
+        Exploitability = iff(KbIsExploitAvailable == true, "Exploit available", ""),
+        Status = "Active",
+        FirstSeen = TimeGenerated,
+        LastSeen = TimeGenerated,
+        Remediation = RecommendedSecurityUpdate,
+        Evidence = pack(
+            "softwareVendor", SoftwareVendor,
+            "softwareName", SoftwareName,
+            "softwareVersion", SoftwareVersion,
+            "recommendedSecurityUpdateId", RecommendedSecurityUpdateId,
+            "cveTags", CveTags,
+            "description", KbVulnerabilityDescription,
+            "publishedDate", KbPublishedDate,
+            "affectedSoftware", KbAffectedSoftware,
+            "deviceTags", ContextTags,
+            "watchlistTags", WatchlistTags,
+            "publicIp", ContextPublicIP,
+            "mdeExposureLevel", ContextExposureLevel,
+            "isInternetFacing", ContextIsInternetFacing
+        )
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "MDE security recommendations normalized to the TEM finding-on-asset schema."
+) TEM_MdeRecommendations()
+{
+    let mdeDevices = TEM_MdeDeviceContext();
+    let assetContext =
+        TEM_AssetContext()
+        | where SourceSystem in~ ("", "MDE", "Defender", "MicrosoftDefender")
+        | project
+            WatchlistAssetId = AssetId,
+            WatchlistAssetName = AssetName,
+            WatchlistAssetKind = AssetKind,
+            WatchlistAssetCriticality = AssetCriticality,
+            WatchlistAssetExposure = AssetExposure,
+            WatchlistBusinessService = BusinessService,
+            WatchlistOwner = Owner,
+            WatchlistEnvironment = Environment,
+            WatchlistTags = Tags;
+    DeviceTvmSecureConfigurationAssessment
+    | where IsApplicable == true and IsCompliant == false
+    | join kind=leftouter (
+        DeviceTvmSecureConfigurationAssessmentKB
+        | summarize arg_max(TimeGenerated, *) by ConfigurationId
+        | project
+            ConfigurationId,
+            KbConfigurationName = ConfigurationName,
+            KbConfigurationDescription = ConfigurationDescription,
+            KbRiskDescription = RiskDescription,
+            KbRemediationOptions = RemediationOptions,
+            KbTags = Tags,
+            KbBenchmarks = ConfigurationBenchmarks,
+            KbMitreTactics = RelatedMitreTactics,
+            KbMitreTechniques = RelatedMitreTechniques
+    ) on ConfigurationId
+    | join kind=leftouter mdeDevices on DeviceId
+    | join kind=leftouter assetContext on $left.DeviceId == $right.WatchlistAssetId
+    | extend
+        ImpactScore = todouble(ConfigurationImpact),
+        AssetKindDerived = case(
+            OSPlatform has "Server" or OSPlatform in~ ("Linux", "Ubuntu", "RedHat", "CentOS"), "Server",
+            OSPlatform has_any ("Windows10", "Windows11", "macOS"), "Workstation",
+            ContextAssetKind),
+        Severity = TEM_NormalizeSeverity("", ImpactScore)
+    | project
+        TimeGenerated,
+        SourceSystem = "MDE",
+        FindingType = "Recommendation",
+        AssetId = DeviceId,
+        AssetName = coalesce(nullif(WatchlistAssetName, ""), nullif(DeviceName, ""), nullif(ContextDeviceName, "")),
+        AssetKind = coalesce(nullif(WatchlistAssetKind, ""), nullif(AssetKindDerived, ""), "Endpoint"),
+        AssetCriticality = coalesce(nullif(WatchlistAssetCriticality, ""), nullif(ContextAssetCriticality, ""), "Medium"),
+        AssetExposure = coalesce(nullif(WatchlistAssetExposure, ""), nullif(ContextAssetExposure, ""), "RegularInternal"),
+        BusinessService = coalesce(nullif(WatchlistBusinessService, ""), nullif(ContextBusinessService, "")),
+        Owner = WatchlistOwner,
+        Environment = WatchlistEnvironment,
+        FindingId = ConfigurationId,
+        FindingTitle = coalesce(KbConfigurationName, strcat(ConfigurationCategory, " - ", ConfigurationSubcategory)),
+        FindingCategory = coalesce(ConfigurationCategory, "Secure configuration"),
+        FindingSeverity = Severity,
+        CvssScore = ImpactScore,
+        CvssVector = "",
+        ExploitAvailable = bool(null),
+        Exploitability = "",
+        Status = "NonCompliant",
+        FirstSeen = coalesce(Timestamp, TimeGenerated),
+        LastSeen = TimeGenerated,
+        Remediation = KbRemediationOptions,
+        Evidence = pack(
+            "configurationSubcategory", ConfigurationSubcategory,
+            "context", Context,
+            "description", KbConfigurationDescription,
+            "riskDescription", KbRiskDescription,
+            "configurationTags", KbTags,
+            "benchmarks", KbBenchmarks,
+            "mitreTactics", KbMitreTactics,
+            "mitreTechniques", KbMitreTechniques,
+            "deviceTags", ContextTags,
+            "watchlistTags", WatchlistTags,
+            "publicIp", ContextPublicIP,
+            "mdeExposureLevel", ContextExposureLevel,
+            "isInternetFacing", ContextIsInternetFacing
+        )
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Rapid7 web application vulnerabilities normalized to the TEM finding-on-asset schema."
+) TEM_Rapid7WebApplicationVulnerabilities()
+{
+    let assetContext =
+        TEM_AssetContext()
+        | where SourceSystem in~ ("", "Rapid7")
+        | project
+            WatchlistAssetId = AssetId,
+            WatchlistAssetName = AssetName,
+            WatchlistAssetKind = AssetKind,
+            WatchlistAssetCriticality = AssetCriticality,
+            WatchlistAssetExposure = AssetExposure,
+            WatchlistBusinessService = BusinessService,
+            WatchlistOwner = Owner,
+            WatchlistEnvironment = Environment,
+            WatchlistTags = Tags;
+    Rapid7AppSecFindings_CL
+    | where Status !in~ ("Fixed", "Closed", "Remediated", "FalsePositive", "AcceptedRisk")
+    | join kind=leftouter assetContext on $left.AssetId == $right.WatchlistAssetId
+    | extend Severity = TEM_NormalizeSeverity(Severity, todouble(CvssScore))
+    | project
+        TimeGenerated,
+        SourceSystem = "Rapid7",
+        FindingType = "Vulnerability",
+        AssetId = tostring(AssetId),
+        AssetName = coalesce(nullif(WatchlistAssetName, ""), nullif(AssetName, ""), nullif(ApplicationName, ""), nullif(Url, ""), nullif(HostName, "")),
+        AssetKind = coalesce(nullif(WatchlistAssetKind, ""), nullif(AssetType, ""), "WebApplication"),
+        AssetCriticality = coalesce(nullif(WatchlistAssetCriticality, ""), nullif(AssetCriticality, ""), "Medium"),
+        AssetExposure = coalesce(nullif(WatchlistAssetExposure, ""), nullif(AssetExposure, ""), "External"),
+        BusinessService = WatchlistBusinessService,
+        Owner = WatchlistOwner,
+        Environment = WatchlistEnvironment,
+        FindingId = tostring(FindingId),
+        FindingTitle = tostring(FindingTitle),
+        FindingCategory = tostring(FindingCategory),
+        FindingSeverity = Severity,
+        CvssScore = todouble(CvssScore),
+        CvssVector = tostring(CvssVector),
+        ExploitAvailable = tobool(ExploitAvailable),
+        Exploitability = tostring(Exploitability),
+        Status = tostring(Status),
+        FirstSeen = todatetime(FirstSeen),
+        LastSeen = todatetime(LastSeen),
+        Remediation = tostring(Remediation),
+        Evidence = pack(
+            "url", Url,
+            "hostName", HostName,
+            "port", Port,
+            "protocol", Protocol,
+            "scanId", ScanId,
+            "findingDescription", FindingDescription,
+            "sourceTags", Tags,
+            "watchlistTags", WatchlistTags,
+            "sourceEvidence", Evidence,
+            "rawRecord", RawRecord
+        )
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Defender for Cloud recommendations normalized to the TEM finding-on-asset schema."
+) TEM_DefenderForCloudRecommendations()
+{
+    let assetContext =
+        TEM_AssetContext()
+        | where SourceSystem in~ ("", "DefenderForCloud", "Azure")
+        | project
+            WatchlistAssetId = AssetId,
+            WatchlistResourceId = ResourceId,
+            WatchlistAssetName = AssetName,
+            WatchlistAssetKind = AssetKind,
+            WatchlistAssetCriticality = AssetCriticality,
+            WatchlistAssetExposure = AssetExposure,
+            WatchlistBusinessService = BusinessService,
+            WatchlistOwner = Owner,
+            WatchlistEnvironment = Environment,
+            WatchlistTags = Tags;
+    SecurityRecommendation
+    | where RecommendationState !in~ ("Healthy", "NotApplicable")
+    | join kind=leftouter assetContext on $left.AssessedResourceId == $right.WatchlistAssetId
+    | extend
+        Severity = TEM_NormalizeSeverity(RecommendationSeverity, real(null)),
+        CloudAssetName = extract(@"([^/]+)$", 1, AssessedResourceId)
+    | project
+        TimeGenerated,
+        SourceSystem = "DefenderForCloud",
+        FindingType = "Recommendation",
+        AssetId = AssessedResourceId,
+        AssetName = coalesce(nullif(WatchlistAssetName, ""), nullif(CloudAssetName, ""), nullif(DeviceId, "")),
+        AssetKind = coalesce(nullif(WatchlistAssetKind, ""), "CloudResource"),
+        AssetCriticality = coalesce(nullif(WatchlistAssetCriticality, ""), "Medium"),
+        AssetExposure = coalesce(nullif(WatchlistAssetExposure, ""), "RegularInternal"),
+        BusinessService = WatchlistBusinessService,
+        Owner = WatchlistOwner,
+        Environment = coalesce(nullif(WatchlistEnvironment, ""), nullif(Environment, "")),
+        FindingId = coalesce(nullif(RecommendationId, ""), RecommendationName),
+        FindingTitle = coalesce(nullif(RecommendationDisplayName, ""), RecommendationName),
+        FindingCategory = ProviderName,
+        FindingSeverity = Severity,
+        CvssScore = real(null),
+        CvssVector = "",
+        ExploitAvailable = bool(null),
+        Exploitability = "",
+        Status = RecommendationState,
+        FirstSeen = coalesce(DiscoveredTimeUTC, FirstEvaluationDate, TimeGenerated),
+        LastSeen = coalesce(StatusChangeDate, TimeGenerated),
+        Remediation = Description,
+        Evidence = pack(
+            "policyDefinitionId", PolicyDefinitionId,
+            "providerName", ProviderName,
+            "resourceRegion", ResourceRegion,
+            "recommendationAdditionalData", RecommendationAdditionalData,
+            "properties", Properties,
+            "watchlistTags", WatchlistTags,
+            "resolvedTimeUTC", ResolvedTimeUTC,
+            "isSnapshot", IsSnapshot
+        )
+}
+
+.create-or-alter function with (
+    folder = "Threat Exposure Management",
+    docstring = "Consolidated TEM findings at the grain of one finding on one asset, scored 0-100."
+) TEM_NormalizedFindings()
+{
+    union isfuzzy=true
+        TEM_MdeVulnerabilities(),
+        TEM_MdeRecommendations(),
+        TEM_Rapid7WebApplicationVulnerabilities(),
+        TEM_DefenderForCloudRecommendations()
+    | invoke TEM_ApplyRiskScore()
+}

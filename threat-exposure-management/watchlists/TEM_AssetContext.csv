@@ -1,0 +1,4 @@
+SearchKey,AssetId,AssetName,Fqdn,ResourceId,Url,AssetKind,AssetCriticality,AssetExposure,BusinessService,Owner,Environment,SourceSystem,Tags
+example-device-id,example-host,example-host.contoso.com,,,"",Server,Critical,CriticalInternal,Example Service,security@example.com,Production,MDE,"tier0;domain-controller"
+example-rapid7-app-id,example-web-app,,,"https://app.example.com",WebApplication,High,External,Example Portal,appsec@example.com,Production,Rapid7,"internet-facing;customer"
+example-azure-resource-id,example-storage,,/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.Storage/storageAccounts/example,,CloudResource,Medium,RegularInternal,Example Platform,cloud@example.com,Production,DefenderForCloud,"platform"

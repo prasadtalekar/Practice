@@ -1,0 +1,117 @@
+// Threat and Exposure Management data-quality checks.
+// Run each query block independently in the Log Analytics workspace.
+
+// 1. Source table freshness and volume.
+let lookback = 7d;
+let expectedTables = datatable(TableName:string, DataSource:string, RequiredFor:string)
+[
+    "DeviceTvmSoftwareVulnerabilities", "MDE", "Endpoint vulnerabilities",
+    "DeviceTvmSoftwareVulnerabilitiesKB", "MDE", "Endpoint vulnerability CVSS and exploitability",
+    "DeviceTvmSecureConfigurationAssessment", "MDE", "Endpoint recommendations",
+    "DeviceTvmSecureConfigurationAssessmentKB", "MDE", "Endpoint recommendation metadata",
+    "DeviceInfo", "MDE", "Endpoint asset tags and exposure",
+    "Rapid7AppSecFindings_CL", "Rapid7", "Web application vulnerabilities",
+    "SecurityRecommendation", "DefenderForCloud", "Cloud recommendations"
+];
+let observedTables =
+    union isfuzzy=true
+        (DeviceTvmSoftwareVulnerabilities | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="DeviceTvmSoftwareVulnerabilities"),
+        (DeviceTvmSoftwareVulnerabilitiesKB | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="DeviceTvmSoftwareVulnerabilitiesKB"),
+        (DeviceTvmSecureConfigurationAssessment | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="DeviceTvmSecureConfigurationAssessment"),
+        (DeviceTvmSecureConfigurationAssessmentKB | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="DeviceTvmSecureConfigurationAssessmentKB"),
+        (DeviceInfo | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="DeviceInfo"),
+        (Rapid7AppSecFindings_CL | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="Rapid7AppSecFindings_CL"),
+        (SecurityRecommendation | summarize RowsLast7d=countif(TimeGenerated > ago(lookback)), LastSeen=max(TimeGenerated) | extend TableName="SecurityRecommendation");
+expectedTables
+| join kind=leftouter observedTables on TableName
+| extend
+    RowsLast7d = coalesce(RowsLast7d, 0),
+    Status = case(RowsLast7d > 0, "Healthy", isnull(LastSeen), "No data", LastSeen < ago(lookback), "Stale", "Check")
+| project TableName, DataSource, RequiredFor, Status, RowsLast7d, LastSeen
+| order by Status asc, DataSource asc, TableName asc
+
+// 2. Required normalized fields by source.
+TEM_NormalizedFindings()
+| summarize
+    Rows=count(),
+    MissingAssetCriticality=countif(isempty(AssetCriticality)),
+    MissingAssetExposure=countif(isempty(AssetExposure)),
+    MissingFindingSeverity=countif(isempty(FindingSeverity) or FindingSeverity == "Unknown"),
+    MissingRiskScore=countif(isnull(RiskScore)),
+    MissingLifecycleTimestamp=countif(isnull(FirstSeen) and isnull(LastSeen)),
+    MissingRemediation=countif(isempty(Remediation))
+    by SourceSystem, FindingType
+| extend
+    AssetCriticalityCoverage=round(100.0 * (Rows - MissingAssetCriticality) / Rows, 1),
+    AssetExposureCoverage=round(100.0 * (Rows - MissingAssetExposure) / Rows, 1),
+    SeverityCoverage=round(100.0 * (Rows - MissingFindingSeverity) / Rows, 1),
+    RiskScoreCoverage=round(100.0 * (Rows - MissingRiskScore) / Rows, 1),
+    LifecycleCoverage=round(100.0 * (Rows - MissingLifecycleTimestamp) / Rows, 1),
+    RemediationCoverage=round(100.0 * (Rows - MissingRemediation) / Rows, 1)
+| order by SourceSystem asc, FindingType asc
+
+// 3. MDE vulnerability join quality: vulnerability rows should enrich from DeviceInfo.
+let latestDeviceInfo = DeviceInfo | summarize arg_max(TimeGenerated, *) by DeviceId | project DeviceId, DeviceName, DeviceType, ExposureLevel, IsInternetFacing;
+DeviceTvmSoftwareVulnerabilities
+| where TimeGenerated > ago(lookback)
+| summarize VulnerabilityRows=count(), Cves=dcount(CveId) by DeviceId, DeviceName
+| join kind=leftouter latestDeviceInfo on DeviceId
+| summarize
+    DevicesWithVulns=dcount(DeviceId),
+    DevicesMissingDeviceInfo=dcountif(DeviceId, isempty(DeviceType) and isempty(ExposureLevel) and isnull(IsInternetFacing)),
+    VulnerabilityRows=sum(VulnerabilityRows),
+    Cves=sum(Cves)
+| extend DeviceInfoJoinCoverage=round(100.0 * (DevicesWithVulns - DevicesMissingDeviceInfo) / DevicesWithVulns, 1)
+
+// 4. Rapid7 enrichment coverage. These fields are required to prioritize web application findings accurately.
+Rapid7AppSecFindings_CL
+| where TimeGenerated > ago(lookback)
+| summarize
+    Findings=count(),
+    MissingAssetCriticality=countif(isempty(AssetCriticality)),
+    MissingAssetExposure=countif(isempty(AssetExposure)),
+    MissingSeverityAndCvss=countif(isempty(Severity) and isnull(CvssScore)),
+    MissingExploitContext=countif(isempty(Exploitability) and isnull(ExploitAvailable)),
+    MissingCvssVector=countif(isempty(CvssVector))
+| extend
+    AssetCriticalityCoverage=round(100.0 * (Findings - MissingAssetCriticality) / Findings, 1),
+    AssetExposureCoverage=round(100.0 * (Findings - MissingAssetExposure) / Findings, 1),
+    FindingCriticalityCoverage=round(100.0 * (Findings - MissingSeverityAndCvss) / Findings, 1),
+    ExploitContextCoverage=round(100.0 * (Findings - MissingExploitContext) / Findings, 1),
+    CvssVectorCoverage=round(100.0 * (Findings - MissingCvssVector) / Findings, 1)
+
+// 5. Defender for Cloud recommendations that still need asset-context enrichment.
+let cloudContext =
+    TEM_AssetContext()
+    | where SourceSystem in~ ("", "DefenderForCloud", "Azure")
+    | project AssessedResourceId=AssetId, WatchlistCriticality=AssetCriticality, WatchlistExposure=AssetExposure;
+SecurityRecommendation
+| where TimeGenerated > ago(lookback)
+| where RecommendationState !in~ ("Healthy", "NotApplicable")
+| join kind=leftouter cloudContext on AssessedResourceId
+| summarize
+    Recommendations=count(),
+    Resources=dcount(AssessedResourceId),
+    MissingAssetCriticality=countif(isempty(WatchlistCriticality)),
+    MissingAssetExposure=countif(isempty(WatchlistExposure))
+| extend
+    AssetCriticalityCoverage=round(100.0 * (Recommendations - MissingAssetCriticality) / Recommendations, 1),
+    AssetExposureCoverage=round(100.0 * (Recommendations - MissingAssetExposure) / Recommendations, 1)
+
+// 6. Top normalized risk records for workbook spot checks.
+TEM_NormalizedFindings()
+| top 100 by RiskScore desc
+| project
+    RiskScore,
+    SourceSystem,
+    FindingType,
+    AssetName,
+    AssetKind,
+    AssetCriticality,
+    AssetExposure,
+    FindingSeverity,
+    FindingId,
+    FindingTitle,
+    Status,
+    Remediation,
+    LastSeen

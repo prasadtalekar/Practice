@@ -1,0 +1,137 @@
+{
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Threat and Exposure Management\n\nConsolidated risk across MDE vulnerabilities, MDE recommendations, Rapid7 web application findings, and Defender for Cloud recommendations. The workbook expects the `TEM_NormalizedFindings()` function to exist in the selected Log Analytics workspace."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "timerange",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 604800000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 86400000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 },
+                { "durationMs": 7776000000 }
+              ]
+            }
+          },
+          {
+            "id": "minimumrisk",
+            "version": "KqlParameterItem/1.0",
+            "name": "MinimumRisk",
+            "type": 1,
+            "isRequired": true,
+            "value": "0"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "TEM_NormalizedFindings()\n| where RiskScore >= todouble('{MinimumRisk}')\n| summarize Findings=count(), Assets=dcount(AssetId), CriticalRisk=countif(RiskScore >= 90), HighRisk=countif(RiskScore between (70.0 .. 89.9)), MaxRisk=max(RiskScore)\n| extend MaxRisk=round(MaxRisk, 1)",
+        "size": 4,
+        "title": "TEM summary",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles"
+      },
+      "name": "summary"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "TEM_NormalizedFindings()\n| where RiskScore >= todouble('{MinimumRisk}')\n| summarize Findings=count(), Assets=dcount(AssetId), AverageRisk=round(avg(RiskScore), 1), MaxRisk=max(RiskScore) by SourceSystem, FindingType\n| order by MaxRisk desc",
+        "size": 0,
+        "title": "Risk by source and finding type",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "source-risk"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "TEM_NormalizedFindings()\n| where RiskScore >= todouble('{MinimumRisk}')\n| summarize Findings=count(), Assets=dcount(AssetId), MaxRisk=max(RiskScore) by AssetCriticality, AssetExposure, FindingSeverity\n| order by MaxRisk desc, Findings desc",
+        "size": 0,
+        "title": "Risk matrix: asset criticality, exposure, and finding severity",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "risk-matrix"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "TEM_NormalizedFindings()\n| where RiskScore >= todouble('{MinimumRisk}')\n| summarize Findings=count(), MaxRisk=max(RiskScore), Sources=make_set(SourceSystem, 10), FindingTypes=make_set(FindingType, 10) by AssetId, AssetName, AssetKind, AssetCriticality, AssetExposure, BusinessService, Owner\n| top 50 by MaxRisk desc\n| project MaxRisk, Findings, AssetName, AssetKind, AssetCriticality, AssetExposure, BusinessService, Owner, Sources, FindingTypes, AssetId",
+        "size": 0,
+        "title": "Highest-risk assets",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "top-assets"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "TEM_NormalizedFindings()\n| where RiskScore >= todouble('{MinimumRisk}')\n| top 100 by RiskScore desc\n| project RiskScore, SourceSystem, FindingType, AssetName, AssetKind, AssetCriticality, AssetExposure, FindingSeverity, FindingId, FindingTitle, Status, Remediation, LastSeen",
+        "size": 0,
+        "title": "Top findings on assets",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "top-findings"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "TEM_NormalizedFindings()\n| summarize Rows=count(), MissingAssetCriticality=countif(isempty(AssetCriticality)), MissingAssetExposure=countif(isempty(AssetExposure)), MissingFindingSeverity=countif(isempty(FindingSeverity) or FindingSeverity == 'Unknown'), MissingRiskScore=countif(isnull(RiskScore)), MissingRemediation=countif(isempty(Remediation)) by SourceSystem, FindingType\n| extend AssetCriticalityCoverage=round(100.0 * (Rows - MissingAssetCriticality) / Rows, 1), AssetExposureCoverage=round(100.0 * (Rows - MissingAssetExposure) / Rows, 1), SeverityCoverage=round(100.0 * (Rows - MissingFindingSeverity) / Rows, 1), RiskScoreCoverage=round(100.0 * (Rows - MissingRiskScore) / Rows, 1), RemediationCoverage=round(100.0 * (Rows - MissingRemediation) / Rows, 1)\n| project SourceSystem, FindingType, Rows, AssetCriticalityCoverage, AssetExposureCoverage, SeverityCoverage, RiskScoreCoverage, RemediationCoverage\n| order by SourceSystem asc, FindingType asc",
+        "size": 0,
+        "title": "Normalized field coverage",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "coverage"
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": []
+}
