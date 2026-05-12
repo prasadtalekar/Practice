@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Custom Log Analytics table contracts for Threat and Exposure Management ingestion.",
+  "tables": {
+    "Rapid7AppSecFindings_CL": {
+      "description": "One Rapid7 web application vulnerability finding on one application, URL, host, or endpoint.",
+      "grain": "AssetId + FindingId + affected endpoint",
+      "requiredColumns": [
+        "TimeGenerated",
+        "AssetId",
+        "AssetName",
+        "FindingId",
+        "FindingTitle",
+        "Status"
+      ],
+      "recommendedColumns": [
+        "AssetCriticality",
+        "AssetExposure",
+        "Severity",
+        "CvssScore",
+        "CvssVector",
+        "Exploitability",
+        "ExploitAvailable",
+        "FirstSeen",
+        "LastSeen",
+        "Remediation",
+        "Tags"
+      ],
+      "columns": [
+        { "name": "TimeGenerated", "type": "datetime", "description": "Ingestion or source event timestamp." },
+        { "name": "IngestionRunId", "type": "string", "description": "Identifier for the export/import run." },
+        { "name": "SourceSystem", "type": "string", "description": "Use Rapid7." },
+        { "name": "Rapid7Region", "type": "string", "description": "Rapid7 platform region when applicable." },
+        { "name": "ScanId", "type": "string", "description": "Rapid7 scan or assessment identifier." },
+        { "name": "AssetId", "type": "string", "description": "Rapid7 application, asset, or site identifier." },
+        { "name": "AssetName", "type": "string", "description": "Human-readable application or asset name." },
+        { "name": "AssetType", "type": "string", "description": "WebApplication, Website, Host, API, or similar." },
+        { "name": "AssetCriticality", "type": "string", "description": "Critical, High, Medium, Low. Derive from Rapid7 tags if needed." },
+        { "name": "AssetExposure", "type": "string", "description": "External, CriticalInternal, RegularInternal, Isolated." },
+        { "name": "ApplicationName", "type": "string", "description": "Application display name when different from AssetName." },
+        { "name": "Url", "type": "string", "description": "Affected URL or application root URL." },
+        { "name": "HostName", "type": "string", "description": "Affected host name." },
+        { "name": "Port", "type": "int", "description": "Affected port when available." },
+        { "name": "Protocol", "type": "string", "description": "HTTP, HTTPS, TCP, or similar." },
+        { "name": "Tags", "type": "dynamic", "description": "Source tags used for criticality, ownership, and scope." },
+        { "name": "FindingId", "type": "string", "description": "Rapid7 vulnerability or finding identifier." },
+        { "name": "FindingTitle", "type": "string", "description": "Finding title." },
+        { "name": "FindingDescription", "type": "string", "description": "Finding description." },
+        { "name": "FindingCategory", "type": "string", "description": "Vulnerability class such as XSS, SQLi, TLS, or CWE category." },
+        { "name": "Severity", "type": "string", "description": "Critical, High, Medium, Low, Informational, or source equivalent." },
+        { "name": "CvssScore", "type": "real", "description": "CVSS score on a 0-10 scale." },
+        { "name": "CvssVector", "type": "string", "description": "CVSS vector string when Rapid7 provides it." },
+        { "name": "Exploitability", "type": "string", "description": "Exploitability label, exploit maturity, or Rapid7 exploit signal." },
+        { "name": "ExploitAvailable", "type": "bool", "description": "True when an exploit is known or available." },
+        { "name": "Status", "type": "string", "description": "Open, Active, Reopened, Fixed, FalsePositive, AcceptedRisk, or equivalent." },
+        { "name": "FirstSeen", "type": "datetime", "description": "First time this finding was observed on this asset." },
+        { "name": "LastSeen", "type": "datetime", "description": "Most recent observation time for this finding on this asset." },
+        { "name": "Remediation", "type": "string", "description": "Recommended fix or remediation summary." },
+        { "name": "Evidence", "type": "dynamic", "description": "Proof, request/response metadata, affected parameters, or source details." },
+        { "name": "RawRecord", "type": "dynamic", "description": "Original Rapid7 payload for traceability." }
+      ]
+    }
+  }
+}
