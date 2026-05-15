@@ -213,6 +213,8 @@ def validate_inventory(rows: Sequence[Dict[str, str]]) -> None:
     problems: List[str] = []
     seen_scan_configs = set()
     for index, row in enumerate(rows, start=2):
+        if not is_active(row):
+            continue
         app_name = row.get("app_name", "")
         for field in INVENTORY_REQUIRED_FIELDS:
             if not row.get(field):

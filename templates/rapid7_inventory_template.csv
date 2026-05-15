@@ -1,5 +1,5 @@
 app_name,app_id,scan_config_id,owner,business_unit,criticality,region,scan_window_utc,active,notes
-Customer Portal,replace-with-app-id,replace-with-scan-config-id,app-owner@example.com,Digital,critical,US,02:00-06:00,yes,Authenticated production scan
-Partner API,replace-with-app-id,replace-with-scan-config-id,api-owner@example.com,Integrations,high,US,03:00-07:00,yes,API scan configuration
-Marketing Site,replace-with-app-id,replace-with-scan-config-id,web-owner@example.com,Marketing,medium,EU,20:00-23:59,yes,Unauthenticated standard scan
-Legacy Admin,replace-with-app-id,replace-with-scan-config-id,admin-owner@example.com,Operations,low,US,01:00-04:00,no,Inactive until owner confirms access
+Customer Portal,replace-with-app-id-1,replace-with-scan-config-id-1,app-owner@example.com,Digital,critical,US,02:00-06:00,yes,Authenticated production scan
+Partner API,replace-with-app-id-2,replace-with-scan-config-id-2,api-owner@example.com,Integrations,high,US,03:00-07:00,yes,API scan configuration
+Marketing Site,replace-with-app-id-3,replace-with-scan-config-id-3,web-owner@example.com,Marketing,medium,EU,20:00-23:59,yes,Unauthenticated standard scan
+Legacy Admin,replace-with-app-id-4,replace-with-scan-config-id-4,admin-owner@example.com,Operations,low,US,01:00-04:00,no,Inactive until owner confirms access

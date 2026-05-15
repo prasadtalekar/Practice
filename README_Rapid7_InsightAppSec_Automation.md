@@ -1,178 +1,175 @@
 # Rapid7 InsightAppSec Monthly Scan Automation
 
-This repository includes a standard-library Python automation utility for
-monthly Rapid7 InsightAppSec scan cycles across a large application inventory.
-It is designed for cron, Jenkins, GitHub Actions, or another enterprise
-scheduler.
+This is the simple version.
 
-## What the automation does
+The goal is:
 
-1. Reads a CSV inventory of InsightAppSec applications and scan configurations.
-2. Creates a monthly cycle plan that spreads applications across daily batches.
-3. Starts only the due scans for the current schedule window.
-4. Updates the cycle tracker with Rapid7 scan IDs and scan statuses.
-5. Produces a Markdown report showing coverage, exceptions, and business unit
-   summaries.
+1. Put all applications in one CSV file.
+2. Split them into safe daily batches.
+3. Start only today's batch.
+4. Check scan status.
+5. Create a monthly report.
 
-This approach avoids launching all ~400 scans at once and gives each monthly
-cycle an auditable tracking file.
+For about 400 applications, start with **20 applications per day**. That spreads
+the work across roughly one business month and avoids starting hundreds of scans
+at once.
 
-## Files
+## Simple workflow
 
-- `automation/rapid7_insightappsec_monthly.py` - CLI automation tool.
-- `templates/rapid7_inventory_template.csv` - inventory template.
-- `templates/rapid7_automation_config.example.json` - API/runtime settings.
+### Step 1: Create the files
 
-## Prerequisites
+Run:
 
-- Python 3.8 or newer.
-- Rapid7 Insight platform API key with InsightAppSec permissions.
-- Existing InsightAppSec application IDs and scan configuration IDs.
+```bash
+python3 automation/rapid7_easy.py setup
+```
 
-Export the API key before launching or monitoring scans:
+This creates:
+
+- `rapid7_inventory.csv`
+- `rapid7_automation_config.json`
+
+### Step 2: Fill in the application list
+
+Open `rapid7_inventory.csv` and add one row per web application.
+
+The three most important columns are:
+
+```text
+app_name,app_id,scan_config_id
+```
+
+Example:
+
+```text
+Customer Portal,12345,abcde
+Partner API,67890,fghij
+```
+
+Keep `active` as `yes` for applications that should be scanned.
+
+### Step 3: Add your Rapid7 API key
+
+Run:
 
 ```bash
 export RAPID7_INSIGHT_API_KEY="your-api-key"
 ```
 
-For non-US Rapid7 regions, update `api_base_url` in a copied config file.
+If your Rapid7 account is not in the US region, update this value in
+`rapid7_automation_config.json`:
 
-## 1. Build the application inventory
-
-Copy the template and replace the placeholder rows with the real application
-list:
-
-```bash
-cp templates/rapid7_inventory_template.csv rapid7_inventory.csv
+```json
+"api_base_url": "https://us.api.insight.rapid7.com/ias/v1"
 ```
 
-Required columns:
+### Step 4: Create the monthly plan
 
-- `app_name`
-- `app_id`
-- `scan_config_id`
-
-Recommended tracking columns:
-
-- `owner`
-- `business_unit`
-- `criticality`
-- `region`
-- `scan_window_utc`
-- `active`
-- `notes`
-
-Set `active` to `yes` for applications that should be included in the monthly
-cycle. Use `no` for applications that are temporarily out of scope.
-
-## 2. Create a monthly scan plan
-
-Example for 400 applications, 20 applications per business day:
+Choose the first scan date for the month:
 
 ```bash
-python3 automation/rapid7_insightappsec_monthly.py plan \
-  --inventory rapid7_inventory.csv \
-  --output cycles/2026-05.csv \
-  --cycle-id 2026-05 \
-  --start-date 2026-05-18 \
-  --apps-per-day 20
+python3 automation/rapid7_easy.py plan --start-date 2026-05-18
 ```
 
-The output cycle CSV becomes the monthly source of truth. Each row tracks:
+This creates a file like:
 
-- batch number
-- scheduled date
-- scan status
-- Rapid7 scan ID
-- launch/completion timestamps
-- failure reason
+```text
+cycles/2026-05.csv
+```
 
-## 3. Dry-run the launch batch
+That file is your monthly tracker.
 
-Always dry-run before starting scans:
+### Step 5: Preview before launching
+
+Run this first so you can see what would start:
 
 ```bash
-python3 automation/rapid7_insightappsec_monthly.py launch \
-  --cycle-file cycles/2026-05.csv \
-  --config rapid7_automation_config.json \
-  --date 2026-05-18 \
-  --max-starts 20 \
-  --dry-run
+python3 automation/rapid7_easy.py dry-run-today
 ```
 
-## 4. Launch due scans
+This does not start any scans.
+
+### Step 6: Start today's scans
+
+When the preview looks correct:
 
 ```bash
-python3 automation/rapid7_insightappsec_monthly.py launch \
-  --cycle-file cycles/2026-05.csv \
-  --config rapid7_automation_config.json \
-  --date 2026-05-18 \
-  --max-starts 20
+python3 automation/rapid7_easy.py start-today
 ```
 
-Recommended scheduler pattern:
+### Step 7: Check scan status
 
-- Run `launch` every 15-30 minutes during approved scan windows.
-- Keep `max_starts_per_run` conservative, such as 15-25, until scan engine
-  capacity is confirmed.
-- Use `scan_window_utc` to prevent scans from starting outside approved windows.
-
-## 5. Monitor scan status
-
-Run the monitor command periodically while scans are active:
+Run this during the scan cycle:
 
 ```bash
-python3 automation/rapid7_insightappsec_monthly.py monitor \
-  --cycle-file cycles/2026-05.csv \
-  --config rapid7_automation_config.json
+python3 automation/rapid7_easy.py status
 ```
 
-Suggested scheduler frequency: every 30-60 minutes during the scan cycle.
+### Step 8: Create the report
 
-## 6. Retry failed starts or failed scans
-
-After investigating the cause, mark failed rows for rerun:
+Run:
 
 ```bash
-python3 automation/rapid7_insightappsec_monthly.py retry-failed \
-  --cycle-file cycles/2026-05.csv
+python3 automation/rapid7_easy.py report
 ```
 
-Then run `launch` again for the same cycle file.
+This creates a report like:
 
-## 7. Generate the monthly report
+```text
+reports/2026-05-rapid7-scan-cycle.md
+```
+
+## What to run every day
+
+After setup is complete, the normal daily process is only:
 
 ```bash
-python3 automation/rapid7_insightappsec_monthly.py report \
-  --cycle-file cycles/2026-05.csv \
-  --output reports/2026-05-rapid7-scan-cycle.md
+python3 automation/rapid7_easy.py dry-run-today
+python3 automation/rapid7_easy.py start-today
+python3 automation/rapid7_easy.py status
 ```
 
-The report includes:
+At the end of the month:
 
-- total applications in scope
-- completed scan percentage
-- status counts
-- completion by business unit
-- exceptions requiring action
+```bash
+python3 automation/rapid7_easy.py report
+```
 
-## Recommended operating model for ~400 apps
+## If scans fail
 
-- Keep one inventory row per InsightAppSec scan configuration.
-- Start with 20 applications per business day and adjust after observing scan
-  duration and scan engine utilization.
-- Prioritize `critical` and `high` applications early in the month.
-- Reserve the final batch days for retries, authentication failures, WAF
-  tuning, and owner follow-up.
-- Treat the generated cycle CSV and Markdown report as monthly audit evidence.
+After fixing the reason for failure, run:
 
-## Example cron entries
+```bash
+python3 automation/rapid7_easy.py retry-failed
+python3 automation/rapid7_easy.py start-today
+```
+
+## Recommended settings for 400 applications
+
+- Use `20` applications per day to start.
+- Put critical and high-risk applications first in the month.
+- Do not launch all 400 scans at the same time.
+- Keep the final few days for retries and failed authentication scans.
+- Use the generated CSV and report as audit evidence.
+
+## Files included
+
+- `automation/rapid7_easy.py` - simple commands for day-to-day use.
+- `automation/rapid7_insightappsec_monthly.py` - advanced CLI with full options.
+- `templates/rapid7_inventory_template.csv` - application inventory template.
+- `templates/rapid7_automation_config.example.json` - config template.
+
+## Optional scheduler example
+
+Once you are comfortable running the commands manually, schedule them with cron
+or Jenkins.
+
+Example cron:
 
 ```cron
-# Launch due scans during an approved UTC window.
-*/30 1-7 * * 1-5 cd /path/to/repo && /usr/bin/python3 automation/rapid7_insightappsec_monthly.py launch --cycle-file cycles/$(date +\%Y-\%m).csv --config rapid7_automation_config.json
+# Start due scans during an approved UTC window.
+*/30 1-7 * * 1-5 cd /path/to/repo && /usr/bin/python3 automation/rapid7_easy.py start-today
 
 # Refresh scan statuses.
-15 * * * 1-5 cd /path/to/repo && /usr/bin/python3 automation/rapid7_insightappsec_monthly.py monitor --cycle-file cycles/$(date +\%Y-\%m).csv --config rapid7_automation_config.json
+15 * * * 1-5 cd /path/to/repo && /usr/bin/python3 automation/rapid7_easy.py status
 ```
-
