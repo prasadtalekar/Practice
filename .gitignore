@@ -1,0 +1,5 @@
+rapid7_automation_config.json
+cycles/
+reports/
+*.tmp
+__pycache__/
