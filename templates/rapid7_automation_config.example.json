@@ -1,0 +1,9 @@
+{
+  "api_base_url": "https://us.api.insight.rapid7.com/ias/v1",
+  "api_key_env": "RAPID7_INSIGHT_API_KEY",
+  "request_timeout_seconds": 60,
+  "retries": 3,
+  "retry_sleep_seconds": 3,
+  "max_starts_per_run": 25,
+  "launch_delay_seconds": 2
+}
