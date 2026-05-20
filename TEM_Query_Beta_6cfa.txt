@@ -1,0 +1,158 @@
+let Lookback = 7d;
+let InternetFacingDevices =
+    DeviceInfo
+    | where TimeGenerated >= ago(Lookback)
+    | summarize arg_max(TimeGenerated, *) by DeviceId
+    | extend
+        DeviceId = tostring(DeviceId),
+        DeviceManualTagsText = tostring(column_ifexists("DeviceManualTags", "")),
+        PublicIP = tostring(column_ifexists("PublicIP", "")),
+        IsInternetFacing = tobool(column_ifexists("IsInternetFacing", false)),
+        OSPlatform = tostring(column_ifexists("OSPlatform", "")),
+        OSVersion = tostring(column_ifexists("OSVersion", "")),
+        DeviceType = tostring(column_ifexists("DeviceType", ""))
+    | extend
+        HasAutomatedCriticality5 = DeviceManualTagsText has "automatedCriticality:5",
+        HasAutomatedCriticality4 = DeviceManualTagsText has "automatedCriticality:4",
+        HasPublicFacingTag = DeviceManualTagsText has "Public Facing"
+    | extend DeviceCriticality = case(
+        HasAutomatedCriticality5, "Critical",
+        HasAutomatedCriticality4, "High",
+        HasPublicFacingTag, "High",
+        "Other"
+    )
+    | extend DeviceCriticalityRank = case(
+        HasAutomatedCriticality5, 5,
+        HasAutomatedCriticality4, 4,
+        HasPublicFacingTag, 1,
+        0
+    )
+    | extend RecommendationSortPriority = case(
+        HasAutomatedCriticality5, 3,
+        HasAutomatedCriticality4 and HasPublicFacingTag, 2,
+        HasAutomatedCriticality4, 1,
+        HasPublicFacingTag, 0,
+        0
+    )
+    | where DeviceType =~ "Server"
+        or DeviceType =~ "Workstation"
+        or OSPlatform has "Server"
+        or OSVersion has "Server"
+        or OSPlatform has "WindowsServer"
+        or OSPlatform in~ ("Windows10", "Windows11")
+        or OSPlatform has "Windows 10"
+        or OSPlatform has "Windows 11"
+        or OSVersion has "Windows 10"
+        or OSVersion has "Windows 11"
+    | where IsInternetFacing == true
+        or HasPublicFacingTag
+        or (
+            isnotempty(PublicIP)
+            and not(PublicIP startswith "10.")
+            and not(PublicIP startswith "192.168.")
+            and not(PublicIP matches regex @"^172\.(1[6-9]|2[0-9]|3[0-1])\.")
+            and not(PublicIP startswith "127.")
+            and not(PublicIP startswith "169.254.")
+        )
+    | where DeviceCriticality in~ ("Critical", "High")
+    | project
+        DeviceId,
+        DeviceName,
+        PublicIP,
+        OSPlatform,
+        OSVersion,
+        MachineGroup,
+        ExposureLevel,
+        DeviceType,
+        IsInternetFacing,
+        DeviceManualTagsText,
+        HasPublicFacingTag,
+        DeviceCriticality,
+        DeviceCriticalityRank,
+        RecommendationSortPriority,
+        DeviceLastSeen = TimeGenerated;
+let ActiveRecommendations =
+    MDVMRecommendations_CL
+    | where TimeGenerated >= ago(Lookback)
+    | summarize arg_max(TimeGenerated, *) by recId
+    | where status =~ "Active"
+    | project
+        recId = tostring(recId),
+        recommendationName,
+        productName,
+        vendor,
+        recommendedVendor,
+        recommendedVersion,
+        recommendationCategory,
+        subCategory,
+        remediationType,
+        severityScore = todouble(severityScore),
+        exposureImpact = todouble(exposureImpact),
+        publicExploit,
+        activeAlert,
+        exposedMachinesCount,
+        totalMachineCount,
+        status,
+        RecommendationLastSeen = TimeGenerated;
+let RecommendationDeviceMap =
+    union
+    (
+        MDVMVulnerabilitiesByDevice_CL
+        | where TimeGenerated >= ago(Lookback)
+        | summarize arg_max(TimeGenerated, *) by deviceId, recommendationReference
+        | where status =~ "Active"
+        | project
+            DeviceId = tostring(deviceId),
+            RecommendationReference = tostring(recommendationReference),
+            SourceTable = "MDVMVulnerabilitiesByDevice_CL",
+            DeviceRecommendationLastSeen = TimeGenerated
+    ),
+    (
+        MDVMSecureConfigurationsByDevice_CL
+        | where TimeGenerated >= ago(Lookback)
+        | summarize arg_max(TimeGenerated, *) by deviceId, recommendationReference
+        | where isApplicable == true
+        | where isCompliant == false
+        | project
+            DeviceId = tostring(deviceId),
+            RecommendationReference = tostring(recommendationReference),
+            SourceTable = "MDVMSecureConfigurationsByDevice_CL",
+            DeviceRecommendationLastSeen = TimeGenerated
+    );
+InternetFacingDevices
+| join kind=inner RecommendationDeviceMap on DeviceId
+| join kind=inner ActiveRecommendations on $left.RecommendationReference == $right.recId
+| summarize arg_max(RecommendationLastSeen, *) by DeviceId, recId
+| extend CombinedSeverityScore = round((todouble(RecommendationSortPriority) * 100.0) + coalesce(severityScore, 0.0), 2)
+| project
+    DeviceCriticality,
+    DeviceManualTagsText,
+    PublicFacingTag = HasPublicFacingTag,
+    DeviceName,
+    PublicIP,
+    recommendationName,
+    severityScore,
+    CombinedSeverityScore,
+    exposureImpact,
+    OSPlatform,
+    OSVersion,
+    DeviceType,
+    MachineGroup,
+    ExposureLevel,
+    recommendationCategory,
+    subCategory,
+    remediationType,
+    productName,
+    vendor,
+    recommendedVersion,
+    publicExploit,
+    activeAlert,
+    exposedMachinesCount,
+    totalMachineCount,
+    status,
+    SourceTable,
+    DeviceLastSeen,
+    RecommendationLastSeen,
+    DeviceRecommendationLastSeen,
+    DeviceCriticalityRank
+| order by CombinedSeverityScore desc, exposureImpact desc, recommendationName asc, DeviceName asc
